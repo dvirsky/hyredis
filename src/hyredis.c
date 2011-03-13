@@ -26,10 +26,6 @@ static PyObject *Redis_execute(Redis* self, PyObject *args);
 
 static PyMethodDef Redis_methods[] = {
     {
-        "execute", (PyCFunction) Redis_execute, METH_VARARGS,
-        "Execute a pipeline context's out buffer"
-    },
-    {
         "command", (PyCFunction) Redis_command, METH_VARARGS,
         "generic command execution"
     },
