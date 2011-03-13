@@ -20,10 +20,8 @@ static PyMemberDef Redis_members[] = {
 static void Redis_dealloc(Redis *self);
 static PyObject *Redis_new(PyTypeObject *type, PyObject *args, PyObject *kwds);
 static int Redis_init(Redis *self, PyObject *args, PyObject *kwds);
-static PyObject *Redis_pipeline(Redis* self, PyObject *args);
-static PyObject *Redis_execute(Redis* self, PyObject *args);
 static PyObject *Redis_command(Redis* self, PyObject *args);
-
+static PyObject *Redis_execute(Redis* self, PyObject *args);
 
 
 static PyMethodDef Redis_methods[] = {
@@ -33,7 +31,11 @@ static PyMethodDef Redis_methods[] = {
     },
     {
         "command", (PyCFunction) Redis_command, METH_VARARGS,
-        "generic command executor"
+        "generic command execution"
+    },
+    {
+        "execute", (PyCFunction) Redis_execute, METH_VARARGS,
+        "execute a pipeline"
     },
     {NULL} /* Sentinel */
 };
@@ -109,7 +111,7 @@ Redis_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
 
     Redis *self;
 
-    char *host = "redis";
+    char *host = "localhost";
     int port = 6379;
     int db = 0;
     int pipeline = 0;
@@ -121,7 +123,7 @@ Redis_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
 
     if (args && kwds) {
         if (!PyArg_ParseTupleAndKeywords(args, kwds, "|siibb", kwdlist,
-                &host, &port, &db, pipeline, transaction)) {
+                &host, &port, &db, &pipeline, &transaction)) {
 
 
             Py_RETURN_NONE;
@@ -132,7 +134,6 @@ Redis_new(PyTypeObject *type, PyObject *args, PyObject *kwds) {
     self = (Redis *) type->tp_alloc(type, 0);
     if (self != NULL) {
         self->pipeline_mode = pipeline;
-        //self->transaction
         self->buffersize = 0;
         self->db = 0;
 
@@ -198,16 +199,36 @@ Redis_init(Redis *self, PyObject *args, PyObject *kwds) {
 static PyObject *
 Redis_execute(Redis* self, PyObject *args) {
 
-    PyObject *ret = PyList_New(0);
-    redisReply *reply = NULL;
-    int i = 0;
-    while (self->buffersize > 0 && redisGetReply(self->conn, (void **) &reply) == REDIS_OK) {
-        --self->buffersize;
-        PyObject *obj = reply->replyObj;
+    //empty command buffer or
+    if (!self->pipeline_mode || self->buffersize <= 0) {
         
-        PyList_Append(ret, obj);
-        //Py_DECREF(obj);
-        //freeReplyObject(reply);
+        PyErr_SetString(self->protocolErrorClass, "Trying to execute and empty or non piplined connection");
+        return NULL;
+    }
+
+    
+    PyObject *ret = PyList_New(self->buffersize);
+    char *err;
+    int i = 0;
+    while (self->buffersize-- > 0) {
+        PyObject *obj = NULL;
+
+        //get the response
+        if (redisGetReply(self->conn, &obj) != REDIS_OK) {
+
+            //mmm..something went wrong
+            err = redisReplyReaderGetError(self->reader);
+            PyErr_SetString(self->protocolErrorClass, err);
+            return NULL;
+        }
+        if (obj == NULL) {
+            //OOM? TODO: check this option
+            Py_RETURN_FALSE;
+        }else {
+
+            PyList_SET_ITEM(ret, i, obj);
+        }
+        i++;
         
     }
     return ret;
@@ -218,9 +239,9 @@ Redis_execute(Redis* self, PyObject *args) {
 static PyObject *
 Redis_command(Redis* self, PyObject *args) {
     
-    char *command = NULL;
+    
     PyObject *argList = NULL;
-    if (!PyArg_ParseTuple(args, "s|O", &command, &argList)) {
+    if (!PyArg_ParseTuple(args, "O", &argList)) {
         Py_RETURN_NONE;
     }
 
@@ -232,15 +253,15 @@ Redis_command(Redis* self, PyObject *args) {
 
 
     //make room for a string array for all commands and args
-    size_t listLen = PyTuple_Size(argList) + 1;
+    size_t listLen = PyTuple_Size(argList);
     size_t i = 0;
 
     //create c string arg list
     char **argStrings = calloc(listLen, sizeof(char *));
     
-    argStrings[0] = command;
-    for(i = 1; i < listLen; i++) {
-          PyObject *strObj = PyObject_Str(PyTuple_GetItem(argList, i - 1));
+    
+    for(i = 0; i < listLen; i++) {
+          PyObject *strObj = PyObject_Str(PyTuple_GetItem(argList, i));
 
           argStrings[i] = strdup(PyString_AsString(strObj));
           Py_DECREF(strObj);
